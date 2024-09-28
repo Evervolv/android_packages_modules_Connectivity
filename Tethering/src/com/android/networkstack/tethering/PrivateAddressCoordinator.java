@@ -32,7 +32,9 @@ import android.content.Context;
 import android.net.ConnectivityManager;
 import android.net.IpPrefix;
 import android.net.LinkAddress;
+import android.net.LinkProperties;
 import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.ip.IpServer;
 import android.util.ArrayMap;
 import android.util.ArraySet;
@@ -51,6 +53,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * This class coordinate IP addresses conflict problem.
@@ -75,18 +78,22 @@ public class PrivateAddressCoordinator {
     private static final String LEGACY_WIFI_P2P_IFACE_ADDRESS = "192.168.49.1/24";
     private static final String LEGACY_BLUETOOTH_IFACE_ADDRESS = "192.168.44.1/24";
     private final List<IpPrefix> mTetheringPrefixes;
-    private final ConnectivityManager mConnectivityMgr;
-    private final TetheringConfiguration mConfig;
+    // A supplier that returns ConnectivityManager#getAllNetworks.
+    private final Supplier<Network[]> mGetAllNetworksSupplier;
+    private final boolean mIsRandomPrefixBaseEnabled;
+    private final boolean mShouldEnableWifiP2pDedicatedIp;
     // keyed by downstream type(TetheringManager.TETHERING_*).
     private final ArrayMap<AddressKey, LinkAddress> mCachedAddresses;
     private final Random mRandom;
 
-    public PrivateAddressCoordinator(Context context, TetheringConfiguration config) {
+    public PrivateAddressCoordinator(Supplier<Network[]> getAllNetworksSupplier,
+            boolean isRandomPrefixBase,
+            boolean shouldEnableWifiP2pDedicatedIp) {
         mDownstreams = new ArraySet<>();
         mUpstreamPrefixMap = new ArrayMap<>();
-        mConnectivityMgr = (ConnectivityManager) context.getSystemService(
-                Context.CONNECTIVITY_SERVICE);
-        mConfig = config;
+        mGetAllNetworksSupplier = getAllNetworksSupplier;
+        mIsRandomPrefixBaseEnabled = isRandomPrefixBase;
+        mShouldEnableWifiP2pDedicatedIp = shouldEnableWifiP2pDedicatedIp;
         mCachedAddresses = new ArrayMap<AddressKey, LinkAddress>();
         // Reserved static addresses for bluetooth and wifi p2p.
         mCachedAddresses.put(new AddressKey(TETHERING_BLUETOOTH, CONNECTIVITY_SCOPE_GLOBAL),
@@ -100,26 +107,26 @@ public class PrivateAddressCoordinator {
     }
 
     /**
-     * Record a new upstream IpPrefix which may conflict with tethering downstreams.
-     * The downstreams will be notified if a conflict is found. When updateUpstreamPrefix is called,
+     * Record a new upstream IpPrefix which may conflict with tethering downstreams. The downstreams
+     * will be notified if a conflict is found. When updateUpstreamPrefix is called,
      * UpstreamNetworkState must have an already populated LinkProperties.
      */
-    public void updateUpstreamPrefix(final UpstreamNetworkState ns) {
+    public void updateUpstreamPrefix(
+            final LinkProperties lp, final NetworkCapabilities nc, final Network network) {
         // Do not support VPN as upstream. Normally, networkCapabilities is not expected to be null,
         // but just checking to be sure.
-        if (ns.networkCapabilities != null && ns.networkCapabilities.hasTransport(TRANSPORT_VPN)) {
-            removeUpstreamPrefix(ns.network);
+        if (nc != null && nc.hasTransport(TRANSPORT_VPN)) {
+            removeUpstreamPrefix(network);
             return;
         }
 
-        final ArrayList<IpPrefix> ipv4Prefixes = getIpv4Prefixes(
-                ns.linkProperties.getAllLinkAddresses());
+        final ArrayList<IpPrefix> ipv4Prefixes = getIpv4Prefixes(lp.getAllLinkAddresses());
         if (ipv4Prefixes.isEmpty()) {
-            removeUpstreamPrefix(ns.network);
+            removeUpstreamPrefix(network);
             return;
         }
 
-        mUpstreamPrefixMap.put(ns.network, ipv4Prefixes);
+        mUpstreamPrefixMap.put(network, ipv4Prefixes);
         handleMaybePrefixConflict(ipv4Prefixes);
     }
 
@@ -161,7 +168,7 @@ public class PrivateAddressCoordinator {
 
         // Remove all upstreams that are no longer valid networks
         final Set<Network> toBeRemoved = new HashSet<>(mUpstreamPrefixMap.keySet());
-        toBeRemoved.removeAll(asList(mConnectivityMgr.getAllNetworks()));
+        toBeRemoved.removeAll(asList(mGetAllNetworksSupplier.get()));
 
         mUpstreamPrefixMap.removeAll(toBeRemoved);
     }
@@ -173,7 +180,7 @@ public class PrivateAddressCoordinator {
     @Nullable
     public LinkAddress requestDownstreamAddress(final IpServer ipServer, final int scope,
             boolean useLastAddress) {
-        if (mConfig.shouldEnableWifiP2pDedicatedIp()
+        if (mShouldEnableWifiP2pDedicatedIp
                 && ipServer.interfaceType() == TETHERING_WIFI_P2P) {
             return new LinkAddress(LEGACY_WIFI_P2P_IFACE_ADDRESS);
         }
@@ -206,7 +213,7 @@ public class PrivateAddressCoordinator {
     }
 
     private int getStartedPrefixIndex() {
-        if (!mConfig.isRandomPrefixBaseEnabled()) return 0;
+        if (!mIsRandomPrefixBaseEnabled) return 0;
 
         final int random = getRandomInt() & 0xffffff;
         // This is to select the starting prefix range (/8, /12, or /16) instead of the actual
