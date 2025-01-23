@@ -122,27 +122,45 @@
  */
 #define CRITICAL(REASON) char _critical[] SECTION("critical") = (REASON)
 
-/*
- * Helper functions called from eBPF programs written in C. These are
- * implemented in the kernel sources.
- */
+// Helpers for writing kernel version specific bpf programs
 
 struct kver_uint { unsigned int kver; };
 #define KVER_(v) ((struct kver_uint){ .kver = (v) })
 #define KVER(a, b, c) KVER_(((a) << 24) + ((b) << 16) + (c))
 #define KVER_NONE KVER_(0)
+#define KVER_4_9  KVER(4, 9, 0)
 #define KVER_4_14 KVER(4, 14, 0)
 #define KVER_4_19 KVER(4, 19, 0)
 #define KVER_5_4  KVER(5, 4, 0)
-#define KVER_5_8  KVER(5, 8, 0)
-#define KVER_5_9  KVER(5, 9, 0)
 #define KVER_5_10 KVER(5, 10, 0)
 #define KVER_5_15 KVER(5, 15, 0)
 #define KVER_6_1  KVER(6, 1, 0)
 #define KVER_6_6  KVER(6, 6, 0)
+#define KVER_6_12 KVER(6, 12, 0)
 #define KVER_INF KVER_(0xFFFFFFFFu)
 
 #define KVER_IS_AT_LEAST(kver, a, b, c) ((kver).kver >= KVER(a, b, c).kver)
+
+// Helpers for writing sdk level specific bpf programs
+//
+// Note: we choose to follow sdk api level values, but there is no real need for this:
+// These just need to be monotonically increasing.  We could also use values ten or even
+// a hundred times larger to leave room for quarters or months.  We may also just use
+// dates or something (2502 or 202506 for 25Q2) or even the mainline bpfloader version...
+// For now this easily suffices for our use case.
+
+struct sdk_level_uint { unsigned int sdk_level; };
+#define SDK_LEVEL_(v) ((struct sdk_level_uint){ .sdk_level = (v) })
+#define SDK_LEVEL_NONE SDK_LEVEL_(0)
+#define SDK_LEVEL_S    SDK_LEVEL_(31) // Android 12
+#define SDK_LEVEL_Sv2  SDK_LEVEL_(32) // Android 12L
+#define SDK_LEVEL_T    SDK_LEVEL_(33) // Android 13
+#define SDK_LEVEL_U    SDK_LEVEL_(34) // Android 14
+#define SDK_LEVEL_V    SDK_LEVEL_(35) // Android 15
+#define SDK_LEVEL_24Q3 SDK_LEVEL_V
+#define SDK_LEVEL_25Q2 SDK_LEVEL_(36) // Android 16
+
+#define SDK_LEVEL_IS_AT_LEAST(lvl, v) ((lvl).sdk_level >= (SDK_LEVEL_##v).sdk_level)
 
 /*
  * BPFFS (ie. /sys/fs/bpf) labelling is as follows:
@@ -166,6 +184,11 @@ struct kver_uint { unsigned int kver; };
  *      for use by iptables xt_bpf extensions.
  *
  * See cs/p:aosp-master%20-file:prebuilts/%20file:genfs_contexts%20"genfscon%20bpf"
+ */
+
+/*
+ * Helper functions called from eBPF programs written in C. These are
+ * implemented in the kernel sources.
  */
 
 /* generic functions */
@@ -268,14 +291,15 @@ static void (*bpf_ringbuf_submit_unsafe)(const void* data, __u64 flags) = (void*
 // Type safe macro to declare a ring buffer and related output functions.
 // Compatibility:
 // * BPF ring buffers are only available kernels 5.8 and above. Any program
-//   accessing the ring buffer should set a program level min_kver >= 5.8.
-// * The definition below sets a map min_kver of 5.8 which requires targeting
+//   accessing the ring buffer should set a program level min_kver >= 5.10,
+//   since 5.10 is the next LTS version.
+// * The definition below sets a map min_kver of 5.10 which requires targeting
 //   a BPFLOADER_MIN_VER >= BPFLOADER_S_VERSION.
 #define DEFINE_BPF_RINGBUF_EXT(the_map, ValueType, size_bytes, usr, grp, md,   \
                                selinux, pindir, share, min_loader, max_loader, \
                                ignore_eng, ignore_user, ignore_userdebug)      \
     DEFINE_BPF_MAP_BASE(the_map, RINGBUF, 0, 0, size_bytes, usr, grp, md,      \
-                        selinux, pindir, share, KVER_5_8, KVER_INF,            \
+                        selinux, pindir, share, KVER_5_10, KVER_INF,           \
                         min_loader, max_loader, ignore_eng, ignore_user,       \
                         ignore_userdebug, 0);                                  \
                                                                                \
