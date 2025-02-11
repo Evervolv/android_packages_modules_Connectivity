@@ -24,8 +24,6 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
-
 import android.app.DownloadManager;
 import android.app.DownloadManager.Query;
 import android.app.DownloadManager.Request;
@@ -56,7 +54,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -84,6 +81,7 @@ public class CertificateTransparencyDownloaderTest {
     private CertificateTransparencyDownloader mCertificateTransparencyDownloader;
 
     private long mNextDownloadId = 666;
+    private static final long LOG_LIST_TIMESTAMP = 123456789L;
 
     @Before
     public void setUp() throws IOException, GeneralSecurityException {
@@ -398,14 +396,12 @@ public class CertificateTransparencyDownloaderTest {
                 mContext, makeContentDownloadCompleteIntent(mCompatVersion, logListFile));
 
         // Assert
-        byte[] signatureBytes = Base64.getDecoder().decode(toByteArray(metadataFile));
         verify(mLogger, times(1))
                 .logCTLogListUpdateStateChangedEvent(mUpdateStatusCaptor.capture());
         LogListUpdateStatus statusValue = mUpdateStatusCaptor.getValue();
         assertThat(statusValue.state())
                 .isEqualTo(CTLogListUpdateState.SIGNATURE_VERIFICATION_FAILED);
-        assertThat(statusValue.signature())
-                .isEqualTo(new String(signatureBytes, StandardCharsets.UTF_8));
+        assertThat(statusValue.signature()).isEqualTo(new String(toByteArray(metadataFile)));
     }
 
     @Test
@@ -422,13 +418,11 @@ public class CertificateTransparencyDownloaderTest {
         mCertificateTransparencyDownloader.onReceive(
                 mContext, makeContentDownloadCompleteIntent(mCompatVersion, invalidLogListFile));
 
-        byte[] signatureBytes = Base64.getDecoder().decode(toByteArray(metadataFile));
         verify(mLogger, times(1))
                 .logCTLogListUpdateStateChangedEvent(mUpdateStatusCaptor.capture());
         LogListUpdateStatus statusValue = mUpdateStatusCaptor.getValue();
-        assertThat(statusValue.state()).isEqualTo(CTLogListUpdateState.VERSION_ALREADY_EXISTS);
-        assertThat(statusValue.signature())
-                .isEqualTo(new String(signatureBytes, StandardCharsets.UTF_8));
+        assertThat(statusValue.state()).isEqualTo(CTLogListUpdateState.LOG_LIST_INVALID);
+        assertThat(statusValue.signature()).isEqualTo(new String(toByteArray(metadataFile)));
     }
 
     @Test
@@ -466,7 +460,8 @@ public class CertificateTransparencyDownloaderTest {
     }
 
     @Test
-    public void testDownloader_endToEndSuccess_installNewVersion() throws Exception {
+    public void testDownloader_endToEndSuccess_installNewVersion_andLogsSuccess() throws Exception {
+        // Arrange
         String newVersion = "456";
         File logListFile = makeLogListFile(newVersion);
         File metadataFile = sign(logListFile);
@@ -474,6 +469,7 @@ public class CertificateTransparencyDownloaderTest {
 
         assertNoVersionIsInstalled();
 
+        // Act
         // 1. Start download of public key.
         mCertificateTransparencyDownloader.startPublicKeyDownload();
 
@@ -491,7 +487,15 @@ public class CertificateTransparencyDownloaderTest {
         mCertificateTransparencyDownloader.onReceive(
                 mContext, makeContentDownloadCompleteIntent(mCompatVersion, logListFile));
 
+        // Assert
         assertInstallSuccessful(newVersion);
+        verify(mLogger, times(1))
+                .logCTLogListUpdateStateChangedEvent(mUpdateStatusCaptor.capture());
+
+        LogListUpdateStatus statusValue = mUpdateStatusCaptor.getValue();
+        assertThat(statusValue.state()).isEqualTo(CTLogListUpdateState.SUCCESS);
+        assertThat(statusValue.signature()).isEqualTo(new String(toByteArray(metadataFile)));
+        assertThat(statusValue.logListTimestamp()).isEqualTo(LOG_LIST_TIMESTAMP);
     }
 
     private void assertNoVersionIsInstalled() {
@@ -600,7 +604,11 @@ public class CertificateTransparencyDownloaderTest {
         File logListFile = File.createTempFile("log_list", "json");
 
         try (OutputStream outputStream = new FileOutputStream(logListFile)) {
-            outputStream.write(new JSONObject().put("version", version).toString().getBytes(UTF_8));
+            JSONObject contentJson =
+                    new JSONObject()
+                            .put("version", version)
+                            .put("log_list_timestamp", LOG_LIST_TIMESTAMP);
+            outputStream.write(contentJson.toString().getBytes());
         }
 
         return logListFile;
