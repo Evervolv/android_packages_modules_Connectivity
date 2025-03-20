@@ -14,7 +14,20 @@
 
 from mobly import asserts
 from scapy.layers.inet import IP, ICMP, IPOption_Router_Alert
-from scapy.layers.inet6 import IPv6, ICMPv6EchoRequest, ICMPv6EchoReply
+from scapy.layers.inet6 import (
+    IPv6,
+    IPv6ExtHdrHopByHop,
+    ICMPv6EchoRequest,
+    ICMPv6EchoReply,
+    ICMPv6MLQuery2,
+    ICMPv6MLReport2,
+    ICMPv6MLDMultAddrRec,
+    ICMPv6NDOptSrcLLAddr,
+    ICMPv6NDOptDstLLAddr,
+    ICMPv6ND_NS,
+    ICMPv6ND_NA,
+    RouterAlert
+)
 from scapy.layers.l2 import Ether
 from scapy.contrib.igmpv3 import IGMPv3, IGMPv3mq, IGMPv3mr, IGMPv3gr
 from net_tests_utils.host.python import apf_test_base, apf_utils, adb_utils, assert_utils, packet_utils
@@ -87,6 +100,24 @@ class ApfV6Test(apf_test_base.ApfTestBase):
             arp_request, "DROPPED_ARP_REQUEST_REPLIED", arp_reply
         )
 
+    def test_non_dad_ipv6_neighbor_solicitation_offload(self):
+        eth = Ether(src=self.server_mac_address, dst=self.client_mac_address)
+        ip = IPv6(src=self.server_ipv6_addresses[0], dst=self.client_ipv6_addresses[0])
+        icmpv6 = ICMPv6ND_NS(tgt=self.client_ipv6_addresses[0])
+        opt = ICMPv6NDOptSrcLLAddr(lladdr=self.server_mac_address)
+        neighbor_solicitation = bytes(eth/ip/icmpv6/opt).hex()
+
+        eth = Ether(src=self.client_mac_address, dst=self.server_mac_address)
+        ip = IPv6(src=self.client_ipv6_addresses[0], dst=self.server_ipv6_addresses[0])
+        icmpv6 = ICMPv6ND_NA(tgt=self.client_ipv6_addresses[0], R=1, S=1, O=1)
+        opt = ICMPv6NDOptDstLLAddr(lladdr=self.client_mac_address)
+        expected_neighbor_advertisement = bytes(eth/ip/icmpv6/opt).hex()
+        self.send_packet_and_expect_reply_received(
+            neighbor_solicitation,
+            "DROPPED_IPV6_NS_REPLIED_NON_DAD",
+            expected_neighbor_advertisement
+        )
+
     @apf_utils.at_least_B()
     def test_ipv4_icmp_echo_request_offload(self):
         eth = Ether(src=self.server_mac_address, dst=self.client_mac_address)
@@ -103,6 +134,7 @@ class ApfV6Test(apf_test_base.ApfTestBase):
         )
 
     @apf_utils.at_least_B()
+    @apf_utils.apf_ram_at_least(3000)
     def test_ipv6_icmp_echo_request_offload(self):
         eth = Ether(src=self.server_mac_address, dst=self.client_mac_address)
         ip = IPv6(src=self.server_ipv6_addresses[0], dst=self.client_ipv6_addresses[0])
@@ -161,3 +193,28 @@ class ApfV6Test(apf_test_base.ApfTestBase):
                 self.clientDevice,
                 f'ip addr del {addr}/32 dev {self.client_iface_name}'
             )
+
+    @apf_utils.at_least_B()
+    @apf_utils.apf_ram_at_least(3000)
+    def test_mldv2_general_query_offload(self):
+        ether = Ether(src=self.server_mac_address, dst='33:33:00:00:00:01')
+        ip = IPv6(src=self.server_ipv6_addresses[0], dst='ff02::1', hlim=1)
+        hopOpts = IPv6ExtHdrHopByHop(options=[RouterAlert(otype=5)])
+        mld = ICMPv6MLQuery2()
+        mldv2_general_query = bytes(ether/ip/hopOpts/mld).hex()
+
+        ether = Ether(src=self.client_mac_address, dst='33:33:00:00:00:16')
+        ip = IPv6(src=self.client_ipv6_addresses[0], dst='ff02::16', hlim=1)
+
+        mcast_addrs = apf_utils.get_exclude_all_host_ipv6_multicast_addresses(
+            self.clientDevice, self.client_iface_name
+        )
+
+        mld_records = []
+        for addr in mcast_addrs:
+            mld_records.append(ICMPv6MLDMultAddrRec(dst=addr, rtype=2))
+        mld = ICMPv6MLReport2(records=mld_records)
+        expected_mldv2_report = bytes(ether/ip/hopOpts/mld).hex()
+        self.send_packet_and_expect_reply_received(
+            mldv2_general_query, "DROPPED_IPV6_MLD_V2_GENERAL_QUERY_REPLIED", expected_mldv2_report
+        )
